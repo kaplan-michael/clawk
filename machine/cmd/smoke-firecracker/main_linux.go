@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && amd64
 
 package main
 
@@ -203,8 +203,6 @@ func cacheDir() (string, error) {
 
 func firecrackerArch() (string, error) {
 	switch runtime.GOARCH {
-	case "arm64":
-		return "aarch64", nil
 	case "amd64":
 		return "x86_64", nil
 	}

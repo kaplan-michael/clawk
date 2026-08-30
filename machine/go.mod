@@ -12,6 +12,8 @@ require (
 	github.com/google/go-containerregistry v0.20.2
 	github.com/google/renameio/v2 v2.0.2
 	github.com/klauspost/compress v1.16.5
+	github.com/mdlayher/socket v0.6.0
+	github.com/mdlayher/vsock v1.3.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0

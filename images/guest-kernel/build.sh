@@ -38,6 +38,14 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRAGMENTS="${FRAGMENTS:-$here/snd.fragment $here/ninep.fragment}"
 WORKDIR="${WORKDIR:-$here/build}"
 OUT="${OUT:-$here/vmlinux}"
+# Optional x86 boot-protocol image for QEMU; the default output is unchanged.
+OUT_QEMU="${OUT_QEMU:-}"
+if [ -n "$OUT_QEMU" ]; then
+	case "$(uname -m)" in
+		x86_64 | amd64) ;;
+		*) echo "ERROR: OUT_QEMU requires an amd64 build host" >&2; exit 1 ;;
+	esac
+fi
 
 echo ">> kata $KATA_VERSION, kernel $KERNEL_VERSION, fragments $FRAGMENTS"
 mkdir -p "$WORKDIR"
@@ -90,6 +98,10 @@ case "$(uname -m)" in
 	x86_64 | amd64)
 		make -C "$ksrc" -j"$(nproc)" vmlinux
 		"${STRIP:-strip}" -s -o "$OUT" "$ksrc/vmlinux"
+		if [ -n "$OUT_QEMU" ]; then
+			make -C "$ksrc" -j"$(nproc)" bzImage
+			cp "$ksrc/arch/x86/boot/bzImage" "$OUT_QEMU"
+		fi
 		;;
 	*)
 		echo "unsupported build arch $(uname -m)" >&2

@@ -20,6 +20,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -153,6 +154,9 @@ type session struct {
 
 func (s *session) serve() {
 	defer s.conn.Close()
+	if !authenticateHost(s.conn) {
+		return
+	}
 
 	// Handshake first — bounded read deadline catches wedged clients.
 	if err := s.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
@@ -722,7 +726,7 @@ func runSSHAgentForwarder(logger *log.Logger) {
 
 func forwardSSHAgent(guest net.Conn, logger *log.Logger) {
 	defer guest.Close()
-	host, err := vsock.Dial(vsockHostCID, sshAgentVSockPort, nil)
+	host, err := vsock.Dial(vsockHostCID, hostServicePort(sshAgentVSockPort), nil)
 	if err != nil {
 		logger.Printf("ssh-agent-forwarder: vsock dial host:%d: %v",
 			sshAgentVSockPort, err)
@@ -847,7 +851,7 @@ func runReverseForwarder(logger *log.Logger) {
 // controlSession dials the host and applies snapshots until the connection
 // drops. A clean EOF (the host shutting down) returns nil.
 func (f *reverseForwarder) controlSession() error {
-	conn, err := vsock.Dial(vsockHostCID, reverseForwardVSockPort, nil)
+	conn, err := vsock.Dial(vsockHostCID, hostServicePort(reverseForwardVSockPort), nil)
 	if err != nil {
 		return fmt.Errorf("vsock dial host:%d: %w", reverseForwardVSockPort, err)
 	}
@@ -933,7 +937,7 @@ func (f *reverseForwarder) acceptLoop(l *reverseListener) {
 func (f *reverseForwarder) forward(local net.Conn, hostPort int) {
 	defer local.Close()
 
-	host, err := vsock.Dial(vsockHostCID, reverseForwardVSockPort, nil)
+	host, err := vsock.Dial(vsockHostCID, hostServicePort(reverseForwardVSockPort), nil)
 	if err != nil {
 		f.log.Printf("reverse-forward: vsock dial host:%d: %v", reverseForwardVSockPort, err)
 		return
@@ -1058,6 +1062,9 @@ func runMemReporter(logger *log.Logger) {
 // files, so this runs inline rather than in a goroutine.
 func serveMemReport(conn net.Conn, logger *log.Logger) {
 	defer conn.Close()
+	if !authenticateHost(conn) {
+		return
+	}
 	mem := readMemInfo()
 	psi := readMemPSICenti()
 
@@ -1307,7 +1314,7 @@ var (
 	serialDevDir = "/dev"
 
 	serialDialHost = func() (net.Conn, error) {
-		return vsock.Dial(vsockHostCID, serialVSockPort, nil)
+		return vsock.Dial(vsockHostCID, hostServicePort(serialVSockPort), nil)
 	}
 )
 
@@ -1950,4 +1957,31 @@ func serialReadFrame(r *bufio.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 	return hdr[0], buf, nil
+}
+
+// Only guest-initiated host services need remapping. The guest listeners
+// (agent, stats, time-sync) retain their protocol ports.
+func hostServicePort(port uint32) uint32 {
+	n, err := strconv.ParseUint(os.Getenv("CLAWK_HOST_PORT_OFFSET"), 10, 32)
+	if err != nil || n > uint64(^uint32(0)-4096) {
+		return port
+	}
+	return uint32(n) + port
+}
+
+// QEMU opts into a per-sandbox preamble because native Linux vsock is shared
+// across host users. VZ/Firecracker retain their existing transport protocol.
+func authenticateHost(conn net.Conn) bool {
+	token := os.Getenv("CLAWK_VSOCK_AUTH")
+	if token == "" {
+		return true
+	}
+	if len(token) != 64 {
+		return false
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	var presented [64]byte
+	_, err := io.ReadFull(conn, presented[:])
+	return err == nil && subtle.ConstantTimeCompare(presented[:], []byte(token)) == 1
 }

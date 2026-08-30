@@ -32,6 +32,13 @@ type SuspendMeta struct {
 	// restores are never gated on it, because most upgrades don't touch
 	// the VM shape — but it makes "which release wrote this?" a cat away.
 	ClawkVersion string `json:"clawk_version,omitempty"`
+
+	// GuestSources identifies the injected init and services. Source builds
+	// often share the version "dev", so the version string cannot detect an
+	// incompatible guest update. Only QEMU sets these fields. Image records
+	// the selected OCI reference.
+	GuestSources string `json:"guest_sources,omitempty"`
+	Image        string `json:"image,omitempty"`
 }
 
 // SuspendSpecFingerprint reduces a Spec to the fields that shape the
@@ -47,6 +54,12 @@ func SuspendSpecFingerprint(s Spec) string {
 // under m cannot be restored by a boot described by want, or "" when the
 // restore should be attempted. An empty want field skips that check.
 func (m SuspendMeta) IncompatibleWith(want SuspendMeta) string {
+	if want.GuestSources != "" && m.GuestSources != want.GuestSources {
+		return "guest init or services changed; a fresh guest disk is required"
+	}
+	if want.Image != "" && m.Image != want.Image {
+		return "guest image changed; a fresh guest disk is required"
+	}
 	if want.Backend != "" && m.Backend != "" && m.Backend != want.Backend {
 		return fmt.Sprintf("written by the %s backend, this boot uses %s", m.Backend, want.Backend)
 	}

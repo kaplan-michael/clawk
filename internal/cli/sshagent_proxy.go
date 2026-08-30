@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package cli
 
@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/clawkwork/clawk/machine"
 )
@@ -111,20 +112,22 @@ func (p *sshAgentProxy) handle(guestConn net.Conn) {
 	defer p.wg.Done()
 	defer guestConn.Close()
 
-	hostConn, err := net.Dial("unix", p.hostSock)
+	hostConn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(p.ctx, "unix", p.hostSock)
 	if err != nil {
 		p.logger.Printf("ssh-agent-proxy: dial host %s: %v", p.hostSock, err)
 		return
 	}
 	defer hostConn.Close()
 
-	// Bidirectional pump. Each direction is a goroutine; the first
-	// half-close ends the other via the deferred Close above.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(hostConn, guestConn) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(guestConn, hostConn) }()
-	wg.Wait()
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(hostConn, guestConn); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(guestConn, hostConn); done <- struct{}{} }()
+	select {
+	case <-done:
+	case <-p.ctx.Done():
+	}
+	_ = guestConn.Close()
+	_ = hostConn.Close()
 }
 
 // resolveHostSSHAuthSock picks the host-side socket path the proxy

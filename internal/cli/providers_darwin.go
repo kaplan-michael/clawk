@@ -19,6 +19,8 @@ func newProvider(p config.Provider) (sandbox.Provider, error) {
 		return sandbox.NewVZProvider(store), nil
 	case config.ProviderFirecracker:
 		return nil, fmt.Errorf("provider %q runs on Linux; this is a macOS build", p)
+	case config.ProviderQEMU:
+		return nil, fmt.Errorf("provider %q requires Linux amd64 (x86-64); this is a macOS build", p)
 	default:
 		return nil, fmt.Errorf("unknown provider %q (valid on macOS: vz)", p)
 	}

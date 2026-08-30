@@ -64,3 +64,12 @@ default at it in `machine/kernel/kernel.go` — the `Override`/fetch path alread
 handles a raw `vmlinux` URL, so the change is wiring the release URL in as the
 default source per arch. Don't flip the default before a boot test: a bad guest
 kernel breaks every new sandbox.
+
+## Optional QEMU output (Linux amd64)
+
+Set `OUT_QEMU=/absolute/path/to/bzImage` to also collect the x86 boot-protocol
+image QEMU needs. The default output, fragments and build procedure stay the
+same. To enable audio capture and nested KVM, include `qemu.fragment` through
+the existing `FRAGMENTS` override alongside `snd.fragment` and `ninep.fragment`.
+See the [QEMU recipe](../../docs/qemu.md#optional-custom-kernels) and
+[native feature checks](../../docs/qemu-validation.md#optional-custom-kernel-checks).

@@ -399,6 +399,8 @@ No. macOS needs Apple silicon (macOS 14+). On Linux, the firecracker
 provider works but is experimental (see
 [docs/commands.md](docs/commands.md#vm-providers)). No Windows support.
 
+For the experimental QEMU provider on Linux amd64, see [docs/qemu.md](docs/qemu.md).
+
 **Do I need Docker installed?**
 No. clawk pulls OCI images and builds bootable disks itself. Docker *images*
 are the input format; the Docker engine is not involved. (Running a Docker

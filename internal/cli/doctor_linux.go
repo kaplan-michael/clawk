@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
+	"github.com/clawkwork/clawk/internal/config"
 	"github.com/clawkwork/clawk/internal/sandbox"
 )
 
@@ -99,4 +101,24 @@ func hostNetSetupCheck() doctorCheck {
 			"'clawk up' cannot create its network devices",
 		"run 'clawk up' from a terminal, enable unprivileged user namespaces, or "+
 			"grant NOPASSWD for ip: '<user> ALL=(ALL) NOPASSWD: /usr/sbin/ip'")
+}
+
+func platformHostChecksFor(p config.Provider) []doctorCheck {
+	if runtime.GOARCH != "amd64" {
+		return []doctorCheck{fail("host: platform", "clawk on Linux requires Linux amd64 (x86-64)", "use a Linux amd64 host")}
+	}
+	if p == config.ProviderFirecracker {
+		return platformHostChecks()
+	}
+	if p != config.ProviderQEMU {
+		return []doctorCheck{fail("host: provider", "provider "+string(p)+" cannot run on Linux", "select firecracker or qemu")}
+	}
+	return qemuHostChecks()
+}
+
+func providerRecordChecks(sb *config.Sandbox, p config.Provider) []doctorCheck {
+	if p != config.ProviderQEMU {
+		return nil
+	}
+	return qemuRecordChecks(sb)
 }

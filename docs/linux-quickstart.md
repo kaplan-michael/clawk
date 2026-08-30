@@ -1,5 +1,7 @@
 # Linux quick start (firecracker)
 
+For the experimental QEMU provider on Linux amd64, see [QEMU](qemu.md).
+
 From nothing to an agent running in a microVM, on Linux, with an honest
 account of what works today and what doesn't.
 
@@ -39,7 +41,7 @@ Grab the tarball for your architecture from the
 for Linux, and nothing to code-sign — that's a macOS requirement):
 
 ```sh
-tar xzf clawk-vX.Y.Z-linux-amd64.tar.gz    # or -linux-arm64
+tar xzf clawk-vX.Y.Z-linux-amd64.tar.gz
 sudo install -m755 clawk /usr/local/bin/
 ```
 

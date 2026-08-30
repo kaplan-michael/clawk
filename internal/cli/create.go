@@ -35,7 +35,7 @@ func reservedSandboxNames() map[string]bool {
 		// Legacy shims (kept for back-compat; can't recycle as names)
 		"here", "phase", "vshell",
 		// Internal subprocess re-execs
-		"__daemon", "__vzd", "__loop-mount", "__loop-unmount",
+		"__daemon", "__vzd", "__qemud", "__loop-mount", "__loop-unmount",
 	} {
 		out[n] = true
 	}
@@ -98,9 +98,9 @@ var createCmd = &cobra.Command{
 			prov = defaultProvider()
 		}
 		switch prov {
-		case config.ProviderVZ, config.ProviderFirecracker:
+		case config.ProviderVZ, config.ProviderFirecracker, config.ProviderQEMU:
 		default:
-			return fmt.Errorf("unknown provider %q (valid: vz, firecracker)", prov)
+			return fmt.Errorf("unknown provider %q (valid: vz, firecracker, qemu)", prov)
 		}
 
 		// Network left zero: Use nil resolves to the built-in "default"

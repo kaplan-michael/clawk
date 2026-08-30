@@ -7,6 +7,27 @@ tagged.
 
 ## Unreleased
 
+### Added
+
+- Experimental QEMU `microvm` provider for Linux amd64, with live virtio-fs
+  worktrees, persistent agent state, shared guest services and checked
+  suspend/restore. Firecracker remains available and is still the Linux default.
+  See [QEMU setup](docs/qemu.md) for prerequisites and custom-kernel features.
+
+### Fixed
+
+- Initialize PID 1's PATH before detecting sudo, so the default development
+  image receives its passwordless sudo policy. QEMU verifies identity,
+  sudo and mounts before exposing the guest agent to clients.
+- Refresh QEMU root filesystems on cold boot and reject suspended memory
+  from obsolete guest sources. Old QEMU disks require explicit recreation;
+  save guest-only files before destroying them.
+
+### Removed
+
+- Linux ARM64 host support and release artifacts. macOS ARM64 and its Linux
+  guest binaries and kernels remain supported.
+
 ## v0.4.0
 
 ### Added

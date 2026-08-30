@@ -150,9 +150,10 @@ without notice.
 | Provider           | Host  | Notes                                                                 |
 |--------------------|-------|-----------------------------------------------------------------------|
 | `vz` (default)     | macOS | Apple Virtualization.framework; no sudo. Live-mounts your worktree.   |
-| `firecracker` (experimental) | Linux | KVM microVM; no sudo on hosts that allow unprivileged user namespaces. Carries the worktree on its own disk (host edits don't propagate live), and skips host-file push, ssh-agent forwarding, reverse port forwards, and per-phase hooks today. |
+| `firecracker` (experimental) | Linux amd64 | KVM microVM; no sudo on hosts that allow unprivileged user namespaces. Carries the worktree on its own disk (host edits don't propagate live), and skips host-file push, ssh-agent forwarding, reverse port forwards, and per-phase hooks today. |
+| `qemu` (experimental) | Linux amd64 | KVM microvm with live shares, host services and checked suspend/restore. See [QEMU requirements](qemu.md). |
 
-Pick one with `--provider`; the choice persists with the sandbox. Both run the
+Pick one with `--provider`; the choice persists with the sandbox. All run the
 same OCI rootfs, vsock agent, and egress allow-list — see
 [ARCHITECTURE.md](../ARCHITECTURE.md) for how they differ under the hood.
 

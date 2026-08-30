@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package cli
 
@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -137,7 +138,7 @@ func startAgentProxy(parentCtx context.Context, m machine.Machine, sockPath stri
 	// the daemon's umask masked group/other access. This socket only
 	// exposes a path INTO the user's own VM — same security boundary
 	// as their own processes.
-	if err := os.Chmod(sockPath, 0o666); err != nil {
+	if err := os.Chmod(sockPath, agentSocketMode()); err != nil {
 		_ = l.Close()
 		return nil, fmt.Errorf("chmod agent sock: %w", err)
 	}
@@ -206,7 +207,7 @@ func (p *agentProxy) ResumeAccept() error {
 	}
 	// Same rationale as startAgentProxy: the socket only exposes a path
 	// into the user's own VM.
-	if err := os.Chmod(p.sockPath, 0o666); err != nil {
+	if err := os.Chmod(p.sockPath, agentSocketMode()); err != nil {
 		_ = l.Close()
 		return fmt.Errorf("chmod agent sock: %w", err)
 	}
@@ -343,4 +344,13 @@ func (p *agentProxy) handle(client net.Conn) {
 // can change in exactly one place.
 func agentSockPath(vmDir string) string {
 	return vmDir + "/agent.sock"
+}
+
+// Native Linux vsock uses a per-user socket and a guest authentication token.
+// Preserve the existing VZ socket mode on macOS.
+func agentSocketMode() os.FileMode {
+	if runtime.GOOS == "linux" {
+		return 0o600
+	}
+	return 0o666
 }

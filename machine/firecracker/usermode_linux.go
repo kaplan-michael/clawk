@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && amd64
 
 // gvproxy attachment for the firecracker backend. Firecracker speaks only a
 // host TAP device, while gvproxy (gvisor-tap-vsock) speaks a unixgram socket

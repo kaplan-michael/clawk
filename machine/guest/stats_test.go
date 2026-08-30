@@ -1,7 +1,11 @@
-package vz
+package guest
 
 import (
+	"context"
+	"github.com/clawkwork/clawk/machine"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -9,31 +13,31 @@ import (
 func TestMemReportRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		r    memReport
+		r    Stats
 	}{
-		{name: "zero", r: memReport{}},
+		{name: "zero", r: Stats{}},
 		{
 			name: "typical idle 4GiB guest",
-			r:    memReport{TotalKiB: 4 * 1024 * 1024, AvailableKiB: 3_500_000, PSIMemSomeCenti: 0},
+			r:    Stats{TotalKiB: 4 * 1024 * 1024, AvailableKiB: 3_500_000, PSIMemSomeCenti: 0},
 		},
 		{
 			name: "guest under memory pressure",
-			r:    memReport{TotalKiB: 4 * 1024 * 1024, AvailableKiB: 120_000, PSIMemSomeCenti: 4231},
+			r:    Stats{TotalKiB: 4 * 1024 * 1024, AvailableKiB: 120_000, PSIMemSomeCenti: 4231},
 		},
 		{
 			name: "busy guest with traffic",
-			r:    memReport{TotalKiB: 4 * 1024 * 1024, AvailableKiB: 1_000_000, Load1Centi: 312, NetIOBytes: 987_654_321},
+			r:    Stats{TotalKiB: 4 * 1024 * 1024, AvailableKiB: 1_000_000, Load1Centi: 312, NetIOBytes: 987_654_321},
 		},
 		{
 			name: "max values",
-			r:    memReport{TotalKiB: ^uint64(0), AvailableKiB: ^uint64(0), PSIMemSomeCenti: ^uint64(0), Load1Centi: ^uint64(0), NetIOBytes: ^uint64(0)},
+			r:    Stats{TotalKiB: ^uint64(0), AvailableKiB: ^uint64(0), PSIMemSomeCenti: ^uint64(0), Load1Centi: ^uint64(0), NetIOBytes: ^uint64(0)},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := encodeMemReport(tt.r)
 			require.Len(t, b, memReportSize, "encoded length")
-			got, err := decodeMemReport(b)
+			got, err := DecodeStats(b)
 			require.NoError(t, err)
 			want := tt.r
 			want.HasActivity = true // full-size buffers always carry the activity fields
@@ -47,13 +51,13 @@ func TestMemReportRoundTrip(t *testing.T) {
 // and HasActivity false — zeroed activity fields mean "absent", and the
 // idle watchdog must be able to tell that apart from "guest is quiet".
 func TestDecodeMemReportLegacy(t *testing.T) {
-	full := encodeMemReport(memReport{
+	full := encodeMemReport(Stats{
 		TotalKiB: 4 * 1024 * 1024, AvailableKiB: 2_000_000, PSIMemSomeCenti: 17,
 		Load1Centi: 999, NetIOBytes: 999, // must NOT survive a legacy-length decode
 	})
-	got, err := decodeMemReport(full[:memReportLegacySize])
+	got, err := DecodeStats(full[:memReportLegacySize])
 	require.NoError(t, err)
-	require.Equal(t, memReport{
+	require.Equal(t, Stats{
 		TotalKiB: 4 * 1024 * 1024, AvailableKiB: 2_000_000, PSIMemSomeCenti: 17,
 	}, got)
 	require.False(t, got.HasActivity)
@@ -65,14 +69,14 @@ func TestDecodeMemReportLegacy(t *testing.T) {
 // which is why the controller only ever reads these fields as evidence
 // that swap IS in use.
 func TestDecodeMemReportActivityOnly(t *testing.T) {
-	full := encodeMemReport(memReport{
+	full := encodeMemReport(Stats{
 		TotalKiB: 4 * 1024 * 1024, AvailableKiB: 2_000_000, PSIMemSomeCenti: 17,
 		Load1Centi: 250, NetIOBytes: 4242,
 		SwapTotalKiB: 999, SwapFreeKiB: 999, // must NOT survive the shorter decode
 	})
-	got, err := decodeMemReport(full[:memReportActivitySize])
+	got, err := DecodeStats(full[:memReportActivitySize])
 	require.NoError(t, err)
-	require.Equal(t, memReport{
+	require.Equal(t, Stats{
 		TotalKiB: 4 * 1024 * 1024, AvailableKiB: 2_000_000, PSIMemSomeCenti: 17,
 		Load1Centi: 250, NetIOBytes: 4242, HasActivity: true,
 	}, got)
@@ -95,13 +99,35 @@ func TestSwapUsedKiB(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := memReport{SwapTotalKiB: tt.total, SwapFreeKiB: tt.free}
+			r := Stats{SwapTotalKiB: tt.total, SwapFreeKiB: tt.free}
 			require.Equal(t, tt.want, r.SwapUsedKiB())
 		})
 	}
 }
 
 func TestDecodeMemReportShort(t *testing.T) {
-	_, err := decodeMemReport(make([]byte, memReportLegacySize-1))
+	_, err := DecodeStats(make([]byte, memReportLegacySize-1))
 	require.Error(t, err, "short buffer must error, not zero-pad")
+}
+
+type statsMachine struct {
+	machine.Machine
+	conn net.Conn
+}
+
+func (m statsMachine) VSock(context.Context, uint32) (net.Conn, error) { return m.conn, nil }
+
+func TestFetchStatsCancellationClosesRead(t *testing.T) {
+	host, peer := net.Pipe()
+	defer peer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { _, err := FetchStats(ctx, statsMachine{conn: host}); result <- err }()
+	cancel()
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("cancelled telemetry read remained blocked")
+	}
 }

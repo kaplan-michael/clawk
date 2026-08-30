@@ -1,4 +1,4 @@
-package vz
+package balloon
 
 import (
 	"testing"
@@ -10,66 +10,66 @@ func TestBalloonTarget(t *testing.T) {
 	const gib = 1024 * 1024 * 1024
 	tests := []struct {
 		name  string
-		level pressureLevel
+		level Pressure
 		full  uint64
 		want  uint64
 	}{
 		{
 			name:  "normal restores full",
-			level: pressureNormal,
+			level: Normal,
 			full:  4 * gib,
 			want:  4 * gib,
 		},
 		{
 			name:  "warn gives back a quarter",
-			level: pressureWarn,
+			level: Warn,
 			full:  4 * gib,
 			want:  3 * gib,
 		},
 		{
 			name:  "critical gives back half",
-			level: pressureCritical,
+			level: Critical,
 			full:  4 * gib,
 			want:  2 * gib,
 		},
 		{
 			name:  "critical clamps to floor",
-			level: pressureCritical,
+			level: Critical,
 			full:  768 * 1024 * 1024, // half would be 384 MiB, below the floor
 			want:  minBalloonFloorBytes,
 		},
 		{
 			name:  "warn clamps to floor",
-			level: pressureWarn,
+			level: Warn,
 			full:  640 * 1024 * 1024, // 3/4 = 480 MiB, below the floor
 			want:  minBalloonFloorBytes,
 		},
 		{
 			name:  "guest at or below floor is left untouched",
-			level: pressureCritical,
+			level: Critical,
 			full:  minBalloonFloorBytes,
 			want:  minBalloonFloorBytes,
 		},
 		{
 			name:  "tiny guest is never inflated below its own size",
-			level: pressureCritical,
+			level: Critical,
 			full:  256 * 1024 * 1024,
 			want:  256 * 1024 * 1024,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := balloonTarget(tt.level, tt.full)
-			require.Equal(t, tt.want, got, "balloonTarget(%s, %d)", tt.level, tt.full)
+			got := HostTarget(tt.level, tt.full)
+			require.Equal(t, tt.want, got, "HostTarget(%s, %d)", tt.level, tt.full)
 		})
 	}
 }
 
 func TestBalloonTargetNeverExceedsFull(t *testing.T) {
 	const full = 2 * 1024 * 1024 * 1024
-	for _, level := range []pressureLevel{pressureNormal, pressureWarn, pressureCritical} {
-		got := balloonTarget(level, full)
-		require.LessOrEqual(t, got, uint64(full), "balloonTarget(%s, %d) exceeds full size", level, full)
+	for _, level := range []Pressure{Normal, Warn, Critical} {
+		got := HostTarget(level, full)
+		require.LessOrEqual(t, got, uint64(full), "HostTarget(%s, %d) exceeds full size", level, full)
 	}
 }
 
@@ -85,7 +85,7 @@ func TestGuestDesiredTarget(t *testing.T) {
 		name string
 		cur  uint64
 		r    memReport
-		// swapPressure is swapTrend.observe's verdict — swap in use and
+		// swapPressure is SwapTrend.Observe's verdict — swap in use and
 		// recently growing. Its own logic is covered by TestSwapTrend; here it
 		// is an input, so these cases pin what the target does with it.
 		swapPressure bool
@@ -209,67 +209,67 @@ func TestSwapTrend(t *testing.T) {
 	}
 
 	t.Run("below the floor is no signal", func(t *testing.T) {
-		var s swapTrend
+		var s SwapTrend
 		for i := 0; i < 3; i++ {
-			require.False(t, s.observe(used(swapUsedFloorKiB-1)))
+			require.False(t, s.Observe(used(swapUsedFloorKiB-1)))
 		}
 	})
 
 	t.Run("no swap device at all is no signal", func(t *testing.T) {
-		var s swapTrend
-		require.False(t, s.observe(memReport{TotalKiB: 4 << 20, AvailableKiB: 2 << 20}))
+		var s SwapTrend
+		require.False(t, s.Observe(memReport{TotalKiB: 4 << 20, AvailableKiB: 2 << 20}))
 	})
 
 	t.Run("crossing the floor starts a hold", func(t *testing.T) {
-		var s swapTrend
-		require.True(t, s.observe(used(swapUsedFloorKiB)))
+		var s SwapTrend
+		require.True(t, s.Observe(used(swapUsedFloorKiB)))
 	})
 
 	t.Run("hold decays once growth stops", func(t *testing.T) {
-		var s swapTrend
-		require.True(t, s.observe(used(2*swapUsedFloorKiB)), "first sighting holds")
+		var s SwapTrend
+		require.True(t, s.Observe(used(2*swapUsedFloorKiB)), "first sighting holds")
 		// Same occupancy, report after report: the guest evicted and moved on.
 		for i := 1; i < swapQuietReportsBeforeReclaim; i++ {
-			require.True(t, s.observe(used(2*swapUsedFloorKiB)),
+			require.True(t, s.Observe(used(2*swapUsedFloorKiB)),
 				"quiet report %d should still hold", i)
 		}
-		require.False(t, s.observe(used(2*swapUsedFloorKiB)),
+		require.False(t, s.Observe(used(2*swapUsedFloorKiB)),
 			"past the quiet window the occupancy is history, not pressure")
-		require.False(t, s.observe(used(2*swapUsedFloorKiB)), "and stays decayed")
+		require.False(t, s.Observe(used(2*swapUsedFloorKiB)), "and stays decayed")
 	})
 
 	t.Run("renewed growth restarts the hold", func(t *testing.T) {
-		var s swapTrend
-		s.observe(used(2 * swapUsedFloorKiB))
+		var s SwapTrend
+		s.Observe(used(2 * swapUsedFloorKiB))
 		for i := 0; i < swapQuietReportsBeforeReclaim+5; i++ {
-			s.observe(used(2 * swapUsedFloorKiB))
+			s.Observe(used(2 * swapUsedFloorKiB))
 		}
-		require.False(t, s.observe(used(2*swapUsedFloorKiB)), "decayed first")
-		require.True(t, s.observe(used(3*swapUsedFloorKiB)),
+		require.False(t, s.Observe(used(2*swapUsedFloorKiB)), "decayed first")
+		require.True(t, s.Observe(used(3*swapUsedFloorKiB)),
 			"growing again means the guest is being squeezed now")
 	})
 
 	t.Run("dropping below the floor resets the quiet count", func(t *testing.T) {
-		var s swapTrend
-		s.observe(used(2 * swapUsedFloorKiB))
+		var s SwapTrend
+		s.Observe(used(2 * swapUsedFloorKiB))
 		for i := 0; i < swapQuietReportsBeforeReclaim+5; i++ {
-			s.observe(used(2 * swapUsedFloorKiB))
+			s.Observe(used(2 * swapUsedFloorKiB))
 		}
-		require.False(t, s.observe(used(2*swapUsedFloorKiB)), "decayed")
+		require.False(t, s.Observe(used(2*swapUsedFloorKiB)), "decayed")
 		// Pages came back in and the guest fell under the floor; a later rise
 		// must not inherit the stale quiet count.
-		require.False(t, s.observe(used(0)))
-		require.True(t, s.observe(used(2*swapUsedFloorKiB)))
+		require.False(t, s.Observe(used(0)))
+		require.True(t, s.Observe(used(2*swapUsedFloorKiB)))
 	})
 
 	t.Run("shrinking swap counts as quiet", func(t *testing.T) {
-		var s swapTrend
-		require.True(t, s.observe(used(10*swapUsedFloorKiB)))
+		var s SwapTrend
+		require.True(t, s.Observe(used(10*swapUsedFloorKiB)))
 		// Faulting pages back in is not eviction pressure.
 		for i := 1; i < swapQuietReportsBeforeReclaim; i++ {
-			require.True(t, s.observe(used(uint64(10-i/4)*swapUsedFloorKiB)))
+			require.True(t, s.Observe(used(uint64(10-i/4)*swapUsedFloorKiB)))
 		}
-		require.False(t, s.observe(used(5*swapUsedFloorKiB)))
+		require.False(t, s.Observe(used(5*swapUsedFloorKiB)))
 	})
 }
 
@@ -305,18 +305,18 @@ func TestMergedBalloonTargetHostPressureWins(t *testing.T) {
 
 	// Under normal pressure the guest gets what it asks for.
 	require.Equal(t, uint64(ceiling),
-		mergedBalloonTarget(pressureNormal, baseline, baseline, ceiling, starved, false))
+		MergedTarget(Normal, baseline, baseline, ceiling, starved, false))
 
-	// Under WARN the host caps growth at balloonTarget(warn, ceiling) even
+	// Under WARN the host caps growth at HostTarget(warn, ceiling) even
 	// though the guest is starving.
-	wantWarn := balloonTarget(pressureWarn, ceiling)
+	wantWarn := HostTarget(Warn, ceiling)
 	require.Equal(t, wantWarn,
-		mergedBalloonTarget(pressureWarn, baseline, baseline, ceiling, starved, false))
+		MergedTarget(Warn, baseline, baseline, ceiling, starved, false))
 	require.Less(t, wantWarn, uint64(ceiling))
 
 	// Under CRITICAL it caps even lower.
-	wantCrit := balloonTarget(pressureCritical, ceiling)
+	wantCrit := HostTarget(Critical, ceiling)
 	require.Equal(t, wantCrit,
-		mergedBalloonTarget(pressureCritical, baseline, baseline, ceiling, starved, false))
+		MergedTarget(Critical, baseline, baseline, ceiling, starved, false))
 	require.Less(t, wantCrit, wantWarn)
 }

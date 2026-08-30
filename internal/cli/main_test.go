@@ -17,7 +17,10 @@ import (
 // invocation. Tests for the layer itself flip both (see withGlobalMod in
 // global_defaults_test.go).
 func TestMain(m *testing.M) {
+	testProviderDaemon()
 	template.GlobalDisabled = true
 	noGlobalFlag = true
 	os.Exit(m.Run())
 }
+
+var testProviderDaemon = func() {}

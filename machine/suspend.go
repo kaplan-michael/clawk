@@ -11,6 +11,7 @@ import (
 // (snapshot.mem). Kept here — next to the backends — so callers above the
 // machine layer never pattern-match backend file layouts themselves.
 var suspendStateFiles = []string{
+	"qemu.state",     // qemu migration stream
 	"state.bin",      // vz
 	"snapshot.state", // firecracker
 }

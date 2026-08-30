@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package cli
 
@@ -12,7 +12,7 @@ import (
 
 	"github.com/clawkwork/clawk/internal/config"
 	"github.com/clawkwork/clawk/machine"
-	"github.com/clawkwork/clawk/machine/vz"
+	"github.com/clawkwork/clawk/machine/guest"
 )
 
 // startIdleWatchdog arms the daemon's idle-stop: once the sandbox has had
@@ -22,7 +22,7 @@ import (
 // down`: DesiredState stays running, the record is annotated with
 // StopReasonIdle, and any attach/run verb boots the VM back.
 //
-// Darwin-only by construction, not oversight: on firecracker the client
+// VZ and QEMU only: on firecracker the client
 // dials the guest's hybrid vsock directly, so a daemon-side watchdog
 // can't see sessions and would park a VM mid-conversation.
 func startIdleWatchdog(ctx context.Context, sb *config.Sandbox, m machine.Machine, proxy *agentProxy, logger *log.Logger) {
@@ -58,7 +58,7 @@ func runIdleWatchdog(ctx context.Context, name string, m machine.Machine, proxy 
 				lastSessionNano: proxy.LastSessionNano(),
 			}
 			statsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			stats, err := vz.FetchGuestStats(statsCtx, m)
+			stats, err := guest.FetchStats(statsCtx, m)
 			cancel()
 			switch {
 			case err != nil:
@@ -164,7 +164,7 @@ func attemptIdleStop(name string, proxy *agentProxy, logger *log.Logger, idleFor
 	// completes normally the process exits and this timer dies with it.
 	time.AfterFunc(idleStopExitGrace, func() {
 		logger.Printf("idle-watchdog: shutdown still running after %s; forcing exit", idleStopExitGrace)
-		if err := os.Remove(filepath.Join(store.VMDir(name), "vz.pid")); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(filepath.Join(store.VMDir(name), daemonPIDFile(fresh.Provider))); err != nil && !os.IsNotExist(err) {
 			logger.Printf("idle-watchdog: removing pidfile: %v", err)
 		}
 		os.Exit(0)

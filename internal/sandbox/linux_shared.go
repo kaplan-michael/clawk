@@ -84,8 +84,6 @@ const (
 // kernel-style names (aarch64 / x86_64), not Go's GOARCH ("arm64" / "amd64").
 func ciArch() string {
 	switch runtime.GOARCH {
-	case "arm64":
-		return "aarch64"
 	case "amd64":
 		return "x86_64"
 	default:

@@ -61,6 +61,7 @@ func TestProviderNormalize(t *testing.T) {
 		legacyProviderVFKit: ProviderVZ,
 		ProviderVZ:          ProviderVZ,
 		ProviderFirecracker: ProviderFirecracker,
+		ProviderQEMU:        ProviderQEMU,
 		"":                  "",
 		"bogus":             "bogus",
 	}

@@ -110,6 +110,7 @@ type fileSpec struct {
 }
 
 type serviceSpec struct {
+	Env  []string `json:"env,omitempty"`
 	Name string   `json:"name"`
 	Path string   `json:"path"`
 	Args []string `json:"args,omitempty"`
@@ -121,6 +122,14 @@ const manifestVersion = 1
 // clawk.cfg=<dev> kernel parameter overrides it.
 const defaultConfigDevice = "/dev/vdb"
 
+// Direct-kernel boot gives PID 1 no PATH. Use the same administrative search
+// path for init and its services, before any executable detection or setup.
+const systemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+func setupEnvironment() {
+	_ = os.Setenv("PATH", systemPATH)
+}
+
 func main() {
 	// Everything we print goes to the kernel console (the kernel opens
 	// /dev/console as fds 0-2 for init), which the host captures in
@@ -129,6 +138,7 @@ func main() {
 	if os.Getpid() != 1 {
 		fatalf("must run as PID 1 (booted via init=)")
 	}
+	setupEnvironment()
 
 	mountPseudo()
 
@@ -543,133 +553,238 @@ func appendHostsEntry(hostname string) {
 // ────────────────────────────────────────────────────────────────────────
 
 func ensureUser(u *manifestUser) error {
-	if cur, ok := lookupPasswd(u.Name); ok {
-		if cur.uid == u.UID && cur.gid == u.GID {
-			logf("user %s already present", u.Name)
-			return nil
-		}
-		// Images like docker/sandbox-templates bake the user at uid
-		// 1000; the manifest mirrors the host uid so virtio-fs
-		// ownership lines up. Rewrite rather than recreate, keeping
-		// the image's home content and shell.
-		return reconcileUser(u, cur)
+	passwd, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return err
 	}
+	group, err := os.ReadFile("/etc/group")
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	shadow, err := os.ReadFile("/etc/shadow")
+	hasShadow := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	accounts, err := reconcileAccounts(u, string(passwd), string(group), string(shadow))
+	if err != nil {
+		return err
+	}
+	for _, f := range []struct {
+		path, content string
+		mode          os.FileMode
+	}{
+		{"/etc/passwd", accounts.passwd, 0o644},
+		{"/etc/group", accounts.group, 0o644},
+	} {
+		if err := os.WriteFile(f.path, []byte(f.content), f.mode); err != nil {
+			return err
+		}
+	}
+	if hasShadow {
+		st, err := os.Stat("/etc/shadow")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile("/etc/shadow", []byte(accounts.shadow), st.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	if accounts.oldHome != "" && accounts.oldHome != accounts.home {
+		if _, err := os.Stat(accounts.home); os.IsNotExist(err) {
+			if _, err := os.Stat(accounts.oldHome); err == nil {
+				if err := os.Rename(accounts.oldHome, accounts.home); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if err := seedHome(accounts.home, u.UID, u.GID); err != nil {
+		return err
+	}
+	chownTree(accounts.home, u.UID, u.GID)
+	if _, err := exec.LookPath("sudo"); err == nil {
+		if err := ensureSudoPolicy("/etc", u.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+type accountFiles struct{ passwd, group, shadow, home, oldHome string }
+
+// reconcileAccounts produces one unambiguous account for the requested UID.
+// It preserves unrelated records and group identities: membership names change
+// when an existing UID owner is adopted, but other users retain their groups.
+func reconcileAccounts(u *manifestUser, passwd, group, shadow string) (accountFiles, error) {
+	var out accountFiles
+	if u.Name == "" || strings.ContainsAny(u.Name, ":\n,") || u.UID <= 0 || u.GID < 0 {
+		return out, fmt.Errorf("invalid guest account %q uid=%d gid=%d", u.Name, u.UID, u.GID)
+	}
+	uid, gid := strconv.Itoa(u.UID), strconv.Itoa(u.GID)
+	aliases := map[string]bool{u.Name: true}
+	var current, owner []string
+	for _, line := range strings.Split(passwd, "\n") {
+		f := strings.Split(line, ":")
+		if len(f) < 7 {
+			continue
+		}
+		if f[0] == u.Name && current == nil {
+			current = f
+		}
+		if f[2] == uid {
+			if f[0] == "root" {
+				return out, fmt.Errorf("guest UID %d belongs to root", u.UID)
+			}
+			aliases[f[0]] = true
+			if owner == nil {
+				owner = f
+			}
+		}
+	}
+	chosen := current
+	if chosen == nil {
+		chosen = owner
+	}
+	out.home = "/home/" + u.Name
 	shell := u.Shell
+	if chosen != nil {
+		if current != nil && chosen[5] != "" {
+			out.home = chosen[5]
+		}
+		out.oldHome = chosen[5]
+		if shell == "" {
+			shell = chosen[6]
+		}
+	}
 	if shell == "" {
 		shell = "/bin/sh"
 		if _, err := os.Stat("/bin/bash"); err == nil {
 			shell = "/bin/bash"
 		}
 	}
-	home := "/home/" + u.Name
+	if !filepath.IsAbs(out.home) || out.home == "/" || strings.ContainsAny(shell+out.home, ":\n") {
+		return out, fmt.Errorf("invalid guest home or shell")
+	}
+	entry := fmt.Sprintf("%s:x:%s:%s:clawk agent:%s:%s", u.Name, uid, gid, out.home, shell)
+	rewrite := func(input string, fields int, replacement string) string {
+		var lines []string
+		inserted := false
+		for _, line := range strings.Split(strings.TrimSuffix(input, "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			f := strings.Split(line, ":")
+			if len(f) >= fields && aliases[f[0]] {
+				if !inserted {
+					lines = append(lines, replacement)
+					inserted = true
+				}
+			} else {
+				lines = append(lines, line)
+			}
+		}
+		if !inserted {
+			lines = append(lines, replacement)
+		}
+		return strings.Join(lines, "\n") + "\n"
+	}
+	out.passwd = rewrite(passwd, 7, entry)
+	// Prefer the requested account's password state, otherwise the adopted
+	// owner's. A newly created account has a locked password.
+	shadowEntry := u.Name + ":!::0:99999:7:::"
+	shadowNames := []string{u.Name}
+	if owner != nil {
+		shadowNames = append([]string{owner[0]}, shadowNames...)
+	}
+	for _, name := range shadowNames {
+		for _, line := range strings.Split(shadow, "\n") {
+			f := strings.Split(line, ":")
+			if len(f) >= 2 && f[0] == name {
+				f[0] = u.Name
+				shadowEntry = strings.Join(f, ":")
+				break
+			}
+		}
+	}
+	out.shadow = rewrite(shadow, 2, shadowEntry)
+	var groups [][]string
+	primaryExists, named := false, -1
+	for _, line := range strings.Split(strings.TrimSuffix(group, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, ":")
+		if len(f) >= 4 {
+			if f[2] == gid {
+				primaryExists = true
+			}
+			if f[0] == u.Name {
+				named = len(groups)
+			}
+			members, seen := []string{}, map[string]bool{}
+			for _, member := range strings.Split(f[3], ",") {
+				if aliases[member] {
+					member = u.Name
+				}
+				if member != "" && !seen[member] {
+					members = append(members, member)
+					seen[member] = true
+				}
+			}
+			for _, requested := range u.Groups {
+				if f[0] == requested && !seen[u.Name] {
+					members = append(members, u.Name)
+					seen[u.Name] = true
+				}
+			}
+			f[3] = strings.Join(members, ",")
+		}
+		groups = append(groups, f)
+	}
+	if !primaryExists {
+		if named >= 0 {
+			groups[named][2] = gid
+		} else {
+			groups = append(groups, []string{u.Name, "x", gid, ""})
+		}
+	}
+	var lines []string
+	for _, f := range groups {
+		lines = append(lines, strings.Join(f, ":"))
+	}
+	out.group = strings.Join(lines, "\n") + "\n"
+	return out, nil
+}
 
-	if err := appendLine("/etc/passwd",
-		fmt.Sprintf("%s:x:%d:%d:clawk agent:%s:%s", u.Name, u.UID, u.GID, home, shell)); err != nil {
+func ensureSudoPolicy(etc, name string) error {
+	dir := filepath.Join(etc, "sudoers.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	// The host gid often collides with one the image already defines
-	// (macOS staff=20 vs debian dialout=20). Reuse the existing group —
-	// a second line with the same gid is invalid and confuses id(1).
-	if !gidExists(u.GID) {
-		if err := appendLine("/etc/group",
-			fmt.Sprintf("%s:x:%d:", u.Name, u.GID)); err != nil {
+	rule := filepath.Join(dir, "90-clawk")
+	want := name + " ALL=(ALL) NOPASSWD:ALL\n"
+	if existing, _ := os.ReadFile(rule); string(existing) != want {
+		if err := os.WriteFile(rule, []byte(want), 0o440); err != nil {
 			return err
 		}
 	}
-	// Locked password; only relevant if the image has shadow auth at all.
-	if _, err := os.Stat("/etc/shadow"); err == nil {
-		if err := appendLine("/etc/shadow", u.Name+":!::0:99999:7:::"); err != nil {
-			logf("shadow: %v", err)
-		}
+	if err := os.Chmod(rule, 0o440); err != nil {
+		return err
 	}
-	for _, g := range u.Groups {
-		if err := addUserToGroup(u.Name, g); err != nil {
-			logf("group %s: %v", g, err)
-		}
-	}
-
-	if err := seedHome(home, u.UID, u.GID); err != nil {
-		logf("home: %v", err)
-	}
-
-	// Passwordless sudo when the image ships sudo; harmless otherwise.
-	if st, err := os.Stat("/etc/sudoers.d"); err == nil && st.IsDir() {
-		line := fmt.Sprintf("%s ALL=(ALL) NOPASSWD:ALL\n", u.Name)
-		if err := os.WriteFile("/etc/sudoers.d/90-clawk", []byte(line), 0o440); err != nil {
-			logf("sudoers: %v", err)
-		}
-	}
-	logf("created user %s (uid=%d gid=%d shell=%s)", u.Name, u.UID, u.GID, shell)
-	return nil
-}
-
-type passwdEntry struct {
-	uid, gid    int
-	home, shell string
-}
-
-// lookupPasswd returns name's /etc/passwd entry, if any.
-func lookupPasswd(name string) (passwdEntry, bool) {
-	data, err := os.ReadFile("/etc/passwd")
-	if err != nil {
-		return passwdEntry{}, false
+	path := filepath.Join(etc, "sudoers")
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Split(line, ":")
-		if len(fields) >= 7 && fields[0] == name {
-			uid, err1 := strconv.Atoi(fields[2])
-			gid, err2 := strconv.Atoi(fields[3])
-			if err1 != nil || err2 != nil {
-				return passwdEntry{}, false
-			}
-			return passwdEntry{uid: uid, gid: gid, home: fields[5], shell: fields[6]}, true
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && (fields[0] == "#includedir" || fields[0] == "@includedir") && strings.Trim(fields[1], "\"") == "/etc/sudoers.d" {
+			return nil
 		}
 	}
-	return passwdEntry{}, false
-}
-
-// reconcileUser rewrites an image-baked user's uid/gid to the manifest's
-// (host-mirroring) values and re-owns its home tree, so files the image
-// shipped under /home/<name> stay usable after the uid change.
-func reconcileUser(u *manifestUser, cur passwdEntry) error {
-	data, err := os.ReadFile("/etc/passwd")
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		fields := strings.Split(line, ":")
-		if len(fields) >= 7 && fields[0] == u.Name {
-			fields[2] = strconv.Itoa(u.UID)
-			fields[3] = strconv.Itoa(u.GID)
-			lines[i] = strings.Join(fields, ":")
-		}
-	}
-	if err := os.WriteFile("/etc/passwd", []byte(strings.Join(lines, "\n")), 0o644); err != nil {
-		return err
-	}
-	// Move the user's own group to the new gid too — unless the gid is
-	// already taken (host gid 20 vs debian dialout), in which case the
-	// existing group serves as the primary group.
-	if !gidExists(u.GID) {
-		gdata, err := os.ReadFile("/etc/group")
-		if err == nil {
-			glines := strings.Split(string(gdata), "\n")
-			for i, line := range glines {
-				fields := strings.Split(line, ":")
-				if len(fields) >= 3 && fields[0] == u.Name &&
-					fields[2] == strconv.Itoa(cur.gid) {
-					fields[2] = strconv.Itoa(u.GID)
-					glines[i] = strings.Join(fields, ":")
-				}
-			}
-			_ = os.WriteFile("/etc/group", []byte(strings.Join(glines, "\n")), 0o644)
-		}
-	}
-	chownTree(cur.home, u.UID, u.GID)
-	logf("reconciled user %s: uid %d→%d gid %d→%d", u.Name, cur.uid, u.UID, cur.gid, u.GID)
-	return nil
+	data = append(data, []byte("\n#includedir /etc/sudoers.d\n")...)
+	return os.WriteFile(path, data, 0o440)
 }
 
 // chownTree re-owns path and everything under it, best-effort. Only the
@@ -686,67 +801,6 @@ func chownTree(path string, uid, gid int) {
 		_ = os.Lchown(p, uid, gid)
 		return nil
 	})
-}
-
-func gidExists(gid int) bool {
-	data, err := os.ReadFile("/etc/group")
-	if err != nil {
-		return false
-	}
-	want := ":" + strconv.Itoa(gid) + ":"
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.SplitN(line, ":", 4)
-		if len(fields) >= 3 && ":"+fields[2]+":" == want {
-			return true
-		}
-	}
-	return false
-}
-
-func appendLine(path, line string) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	// Guard against a file with no trailing newline — appending straight
-	// after the last entry would corrupt both lines.
-	if st, err := f.Stat(); err == nil && st.Size() > 0 {
-		var last [1]byte
-		if _, err := f.ReadAt(last[:], st.Size()-1); err == nil && last[0] != '\n' {
-			if _, err := f.WriteString("\n"); err != nil {
-				return err
-			}
-		}
-	}
-	_, err = f.WriteString(line + "\n")
-	return err
-}
-
-// addUserToGroup appends name to an existing group's member list. Missing
-// groups are skipped — e.g. "kvm" on an image without udev conventions.
-func addUserToGroup(name, group string) error {
-	data, err := os.ReadFile("/etc/group")
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-	found := false
-	for i, line := range lines {
-		if !strings.HasPrefix(line, group+":") {
-			continue
-		}
-		found = true
-		if strings.HasSuffix(line, ":") {
-			lines[i] = line + name
-		} else {
-			lines[i] = line + "," + name
-		}
-	}
-	if !found {
-		return nil
-	}
-	return os.WriteFile("/etc/group", []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 func seedHome(home string, uid, gid int) error {
@@ -948,7 +1002,7 @@ func supervise(svc serviceSpec, r *reaper) {
 		// PID 1 starts with an empty environment; give services at
 		// least a standard PATH so their own exec calls can resolve
 		// bare command names.
-		cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+		cmd.Env = append([]string{"PATH=" + systemPATH}, svc.Env...)
 		// Register interest BEFORE the child can exit: start it stopped?
 		// Not needed — SIGCHLD handling is level-triggered via reapAll,
 		// but the pid→chan registration must happen before reapAll could

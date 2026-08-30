@@ -57,7 +57,7 @@ jobs:
       # discover the Linux release doesn't compile.
       - name: cross-build linux release artifacts
         run: |
-          for arch in amd64 arm64; do
+          for arch in amd64; do
             make clean-guestbin
             make guestbin GUEST_ARCH="$arch"
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \

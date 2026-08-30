@@ -12,11 +12,24 @@ func TestSuspendMetaRoundTrip(t *testing.T) {
 		Backend:         "vz",
 		SpecFingerprint: SuspendSpecFingerprint(Spec{VCPU: 4, MemoryMiB: 1024, MemoryMaxMiB: 4096}),
 		ClawkVersion:    "v1.0.0",
+		GuestSources:    "current-sources",
+		Image:           "example/image:v1",
 	}
 	require.NoError(t, WriteSuspendMeta(dir, want))
 	got, ok := ReadSuspendMeta(dir)
 	require.True(t, ok)
 	require.Equal(t, want, got)
+}
+
+func TestSuspendGuestUpdate(t *testing.T) {
+	want := SuspendMeta{GuestSources: "new", Image: "image:v2"}
+	require.Empty(t, want.IncompatibleWith(want))
+	require.Contains(t, (SuspendMeta{GuestSources: "old", Image: want.Image}).IncompatibleWith(want), "guest init")
+	require.Contains(t, (SuspendMeta{GuestSources: want.GuestSources, Image: "image:v1"}).IncompatibleWith(want), "guest image")
+	require.NotEmpty(t, (SuspendMeta{}).IncompatibleWith(want), "unversioned guests must not silently survive upgrades")
+	for _, backend := range []string{"vz", "firecracker"} {
+		require.Empty(t, (SuspendMeta{}).IncompatibleWith(SuspendMeta{Backend: backend}), "existing providers retain pre-metadata restore behavior")
+	}
 }
 
 func TestReadSuspendMetaAbsentOrCorrupt(t *testing.T) {

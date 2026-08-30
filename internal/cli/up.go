@@ -69,7 +69,7 @@ var upCmd = &cobra.Command{
 		}
 
 		switch sb.Provider {
-		case config.ProviderVZ, "":
+		case config.ProviderVZ, config.ProviderQEMU, "":
 			return bringUpVZ(provider, sb)
 		case config.ProviderFirecracker:
 			return bringUpFirecracker(provider, sb)
@@ -128,8 +128,10 @@ func bringUpVZ(provider sandbox.Provider, sb *config.Sandbox) error {
 	// the manifest the guest mounted at boot, so mount anything the guest
 	// doesn't have up yet. vz already exposes every current tag via
 	// its --device args — we just need the guest to mount them.
-	if err := ensureRuntimeMounts(provider, sb); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: mounting runtime shares: %v\n", err)
+	if sb.Provider != config.ProviderQEMU {
+		if err := ensureRuntimeMounts(provider, sb); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: mounting runtime shares: %v\n", err)
+		}
 	}
 	// Push `files (...)` snapshots before `on create` so any setup
 	// command that needs the kube config / aws creds finds them in

@@ -62,7 +62,7 @@ These apply to a running sandbox immediately — no down/up cycle. The port is
 opened on the host only while a process in the guest holds the device open,
 so the Arduino IDE on this machine can still have it the rest of the time.
 
-vz (macOS) only: firecracker's vsock is one-way, so the guest has no channel
+vz (macOS) and qemu (Linux): firecracker's vsock is one-way, so the guest has no channel
 to connect back through.`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -317,10 +317,10 @@ func applySerials(cmd *cobra.Command, sb *config.Sandbox) {
 }
 
 // serialSupported reports whether sb's provider can forward serial devices
-// at all. Only vz can: the guest is the end that dials (see
+// at all. VZ and QEMU can: the guest is the end that dials (see
 // internal/serialfwd), and firecracker's vsock carries host→guest only.
 func serialSupported(sb *config.Sandbox) bool {
-	return sb.Provider.Normalize() == config.ProviderVZ
+	return sb.Provider.Normalize() == config.ProviderVZ || sb.Provider.Normalize() == config.ProviderQEMU
 }
 
 // describeSerial spells out a device in the direction it is used, because

@@ -1,0 +1,121 @@
+package main
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// Exercise init's setup order with the environment supplied by direct-kernel
+// boot. Calling ensureSudoPolicy alone cannot catch the absent-PATH regression.
+func TestSudoDetectedWithoutInheritedPATH(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/sudo"); err != nil {
+		t.Skip("sudo is not installed on the test host; native guest coverage also exercises this path")
+	}
+	t.Setenv("PATH", "")
+	setupEnvironment()
+	if _, err := exec.LookPath("sudo"); err != nil {
+		t.Fatalf("init would silently skip passwordless sudo: %v", err)
+	}
+}
+
+func TestAccounts(t *testing.T) {
+	for _, tc := range []struct{ name, passwd, group, shadow, home string }{
+		{"new", "root:x:0:0:root:/root:/bin/sh\n", "root:x:0:\n", "root:!:1::::::\n", "/home/agent"},
+		{"adopt UID differing GID", "root:x:0:0:root:/root:/bin/sh\nnode:x:1234:1234:Node:/home/node:/bin/sh\n", "root:x:0:\nnode:x:1234:\nwheel:x:10:node,other\n", "node:!:1::::::\n", "/home/agent"},
+		{"existing target group", "node:x:1234:1234:Node:/home/node:/bin/sh\nagent:x:1000:1000::/custom/agent:/bin/sh\n", "agent:x:1000:\nstaff:x:4321:other\nwheel:x:10:node,agent,other\n", "node:!:1::::::\nagent:*:2::::::\n", "/custom/agent"},
+		{"duplicate agent", "agent:x:1234:1000::/custom/home:/bin/sh\nagent:x:1234:1234::/home/agent:/bin/sh\nother:x:22:22::/srv/other:/bin/sh\n", "agent:x:1000:\nwheel:x:10:agent,agent,other\n", "agent:!:1::::::\nagent:*:2::::::\nother:!:3::::::\n", "/custom/home"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := &manifestUser{Name: "agent", UID: 1234, GID: 4321, Groups: []string{"wheel", "missing"}}
+			got, err := reconcileAccounts(u, tc.passwd, tc.group, tc.shadow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.home != tc.home {
+				t.Fatalf("home = %s", got.home)
+			}
+			if strings.Count(got.passwd, "agent:x:") != 1 || !strings.Contains(got.passwd, "agent:x:1234:4321:") {
+				t.Fatal(got.passwd)
+			}
+			if strings.Count(got.shadow, "agent:") != 1 {
+				t.Fatal(got.shadow)
+			}
+			if strings.Contains(got.group, ":node,") || strings.Contains(got.group, "agent,agent") {
+				t.Fatal(got.group)
+			}
+			if strings.Contains(tc.group, "wheel:") && !strings.Contains(got.group, "wheel:x:10:agent,other") {
+				t.Fatal(got.group)
+			}
+			if strings.Contains(tc.group, "staff:") && !strings.Contains(got.group, "staff:x:4321:other") {
+				t.Fatal(got.group)
+			}
+			if !strings.Contains(got.group, ":4321:") {
+				t.Fatal(got.group)
+			}
+			if strings.Contains(tc.passwd, "other:") && !strings.Contains(got.passwd, "other:x:22:22::/srv/other:/bin/sh") {
+				t.Fatal(got.passwd)
+			}
+			again, err := reconcileAccounts(u, got.passwd, got.group, got.shadow)
+			if err != nil || got.passwd != again.passwd || got.group != again.group || got.shadow != again.shadow || got.home != again.home {
+				t.Fatalf("not idempotent: %+v\n%+v: %v", got, again, err)
+			}
+		})
+	}
+}
+
+func TestSudoPolicy(t *testing.T) {
+	for _, existing := range []string{"", "root ALL=(ALL) ALL\n", "@includedir /etc/sudoers.d\n", "#includedir /etc/sudoers.d\n"} {
+		etc := t.TempDir()
+		if err := os.WriteFile(filepath.Join(etc, "sudoers"), []byte(existing), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			if err := ensureSudoPolicy(etc, "agent"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, err := os.ReadFile(filepath.Join(etc, "sudoers"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(data), "includedir /etc/sudoers.d") != 1 {
+			t.Fatal(string(data))
+		}
+		rule := filepath.Join(etc, "sudoers.d", "90-clawk")
+		st, err := os.Stat(rule)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0440 {
+			t.Fatal(st.Mode())
+		}
+	}
+}
+
+func TestCustomHomeOwnershipAndRepeatedSetup(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "custom", "home")
+	if err := seedHome(home, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(home, "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(nested, "keep")
+	if err := os.WriteFile(file, []byte("image data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := seedHome(home, os.Getuid(), os.Getgid()); err != nil {
+			t.Fatal(err)
+		}
+		chownTree(home, os.Getuid(), os.Getgid())
+	}
+	data, err := os.ReadFile(file)
+	if err != nil || string(data) != "image data" {
+		t.Fatalf("home contents changed: %q %v", data, err)
+	}
+}

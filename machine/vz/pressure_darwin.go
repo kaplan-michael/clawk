@@ -11,8 +11,17 @@ import (
 	"time"
 
 	codevz "github.com/Code-Hex/vz/v3"
+	"github.com/clawkwork/clawk/machine/balloon"
 	"github.com/clawkwork/clawk/machine/internal/debug"
 	"golang.org/x/sys/unix"
+)
+
+type pressureLevel = balloon.Pressure
+
+const (
+	pressureNormal   = balloon.Normal
+	pressureWarn     = balloon.Warn
+	pressureCritical = balloon.Critical
 )
 
 // EVFILT_MEMORYSTATUS and its NOTE_MEMORYSTATUS_PRESSURE_* flags are part of
@@ -203,7 +212,7 @@ func (v *vm) runBalloonController(ctx context.Context, dev *codevz.VirtioTraditi
 	// once per arriving report and its verdict held until the next one — the
 	// same lifetime as rep itself. Re-observing on a tick would see the same
 	// numbers, count them as quiet, and decay the hold in seconds.
-	var swap swapTrend
+	var swap balloon.SwapTrend
 	var swapPressure bool
 
 	debug.Log("vz", "balloon controller started", "id", v.spec.ID,
@@ -219,14 +228,14 @@ func (v *vm) runBalloonController(ctx context.Context, dev *codevz.VirtioTraditi
 		if fresh {
 			// Guest reported, so its balloon driver is up: manage between
 			// baseline and ceiling on demand.
-			target = mergedBalloonTarget(level, cur, baseline, ceiling, rep, swapPressure)
+			target = balloon.MergedTarget(level, cur, baseline, ceiling, rep, swapPressure)
 		} else {
 			// No fresh report — guest still booting, image has no reporter, or
 			// the agent died. Don't try to inflate: a target set before the
 			// guest's virtio_balloon driver attaches is silently dropped, which
 			// is the bug that left the balloon stuck. Give it the ceiling,
 			// capped only by host pressure.
-			target = balloonTarget(level, ceiling)
+			target = balloon.HostTarget(level, ceiling)
 		}
 		changed := target != cur
 		cur = target
@@ -258,7 +267,7 @@ func (v *vm) runBalloonController(ctx context.Context, dev *codevz.VirtioTraditi
 			apply("pressure")
 		case rep = <-reports:
 			lastReport = time.Now()
-			swapPressure = swap.observe(rep)
+			swapPressure = swap.Observe(rep)
 			apply("report")
 		case <-t.C:
 			apply("tick")

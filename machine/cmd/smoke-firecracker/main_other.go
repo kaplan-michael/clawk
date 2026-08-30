@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux || !amd64
 
 package main
 
@@ -9,7 +9,7 @@ import (
 
 func main() {
 	fmt.Fprintln(os.Stderr,
-		"smoke-firecracker is linux-only (firecracker requires /dev/kvm). "+
-			"Run this inside a `clawk here --nested` guest on macOS.")
+		"smoke-firecracker requires Linux amd64 with /dev/kvm. "+
+			"Run this on an x86-64 KVM host.")
 	os.Exit(1)
 }

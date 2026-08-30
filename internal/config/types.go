@@ -197,6 +197,8 @@ const (
 	// ProviderFirecracker runs sandboxes on Linux via Firecracker.
 	// Networking is TAP-on-bridge with no host-side filtering.
 	ProviderFirecracker Provider = "firecracker"
+	// ProviderQEMU runs the experimental Linux amd64 QEMU/KVM microvm backend.
+	ProviderQEMU Provider = "qemu"
 
 	// legacyProviderVFKit is the retired identifier for ProviderVZ. The vz
 	// provider (in-process Apple Virtualization.framework) was originally

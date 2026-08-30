@@ -143,7 +143,7 @@ func restoreOrStart(ctx context.Context, m machine.Machine, vmDir string, logger
 
 // onVMResume is called after the daemon resumes a paused VM, so platform
 // code can re-synchronise guest state that went stale during the pause.
-// The darwin daemon points this at triggerTimeSync (the guest wallclock is
+// The vz and qemu daemons point this at triggerTimeSync (the guest wallclock is
 // the thing a long pause visibly breaks); elsewhere it is a no-op.
 var onVMResume = func() {}
 
@@ -362,9 +362,9 @@ func (l *vmLifecycle) armExitBackstop() {
 	vmDir := filepath.Dir(l.suspendDir)
 	time.AfterFunc(suspendExitGrace, func() {
 		l.logger.Printf("lifecycle: shutdown still running %s after suspend; forcing exit", suspendExitGrace)
-		// Only one of these exists (vz.pid on darwin, fc.pid on linux);
+		// Only one of these exists per sandbox;
 		// removing the absent one is a harmless no-op.
-		for _, name := range []string{"vz.pid", "fc.pid"} {
+		for _, name := range []string{"vz.pid", "fc.pid", "qemu-daemon.pid"} {
 			if err := os.Remove(filepath.Join(vmDir, name)); err != nil && !os.IsNotExist(err) {
 				l.logger.Printf("lifecycle: removing pidfile %s: %v", name, err)
 			}
@@ -466,7 +466,7 @@ func effectiveUseForLog(sb *config.Sandbox) []string {
 
 // reverseForwardSink publishes a reverse-forward set to the in-guest agent.
 // An interface so controlHandlers stays platform-neutral: the only
-// implementation is the darwin reverseProxy, and the firecracker daemon
+// implementation is the shared reverseProxy, and the firecracker daemon
 // passes nil (its backend can't accept guest-initiated vsock connections).
 type reverseForwardSink interface {
 	Set([]config.PortForward)
@@ -474,13 +474,13 @@ type reverseForwardSink interface {
 
 // serialSink publishes a serial-device set to the in-guest agent. An
 // interface for the same reason reverseForwardSink is one: the only
-// implementation is the darwin serialProxy, and the firecracker daemon
+// implementation is the shared serialProxy, and the firecracker daemon
 // passes nil.
 type serialSink interface {
 	Set([]config.SerialDevice)
 }
 
-// controlHandlers builds the control-socket callbacks shared by both VM
+// controlHandlers builds the control-socket callbacks shared by the VM
 // daemons: the denial ledger, a live network-policy reload from the store,
 // the VM lifecycle surface (pause/resume/suspend), reverse-forward reloads
 // when the daemon has a sink for them, and (when the allow list has one)
@@ -633,6 +633,7 @@ func countForwards(spec machine.Spec) int {
 func waitAndShutdown(ctx context.Context, m machine.Machine, logger *log.Logger) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
+	defer signal.Stop(sigCh)
 
 	stateTick := time.NewTicker(2 * time.Second)
 	defer stateTick.Stop()
@@ -645,6 +646,8 @@ func waitAndShutdown(ctx context.Context, m machine.Machine, logger *log.Logger)
 
 	for {
 		select {
+		case <-ctx.Done():
+			return gracefulStop(m, logger)
 		case sig := <-sigCh:
 			if sig == syscall.SIGUSR1 {
 				dumpGoroutines(logger, "SIGUSR1")
@@ -656,6 +659,9 @@ func waitAndShutdown(ctx context.Context, m machine.Machine, logger *log.Logger)
 			s, err := m.State(ctx)
 			if err != nil {
 				logger.Printf("state probe: %v", err)
+				if s == machine.StateStopped {
+					return err
+				}
 				continue
 			}
 			if s != lastState {

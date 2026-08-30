@@ -147,6 +147,7 @@ type File struct {
 // Service is a long-running process clawk-init starts as root and
 // restarts on exit.
 type Service struct {
+	Env  []string `json:"env,omitempty"`
 	Name string   `json:"name"`
 	Path string   `json:"path"`
 	Args []string `json:"args,omitempty"`

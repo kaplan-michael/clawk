@@ -1,28 +1,32 @@
-package vz
+package balloon
 
-import "fmt"
+import (
+	"fmt"
 
-// pressureLevel is the host memory-pressure level as reported by the XNU
-// memorystatus subsystem (the same signal that drives jetsam and
-// DISPATCH_SOURCE_TYPE_MEMORYPRESSURE).
-type pressureLevel int
-
-const (
-	pressureNormal pressureLevel = iota
-	pressureWarn
-	pressureCritical
+	"github.com/clawkwork/clawk/machine/guest"
 )
 
-func (p pressureLevel) String() string {
+type memReport = guest.Stats
+
+// Pressure is the platform-neutral host memory-pressure level.
+type Pressure int
+
+const (
+	Normal Pressure = iota
+	Warn
+	Critical
+)
+
+func (p Pressure) String() string {
 	switch p {
-	case pressureNormal:
+	case Normal:
 		return "normal"
-	case pressureWarn:
+	case Warn:
 		return "warn"
-	case pressureCritical:
+	case Critical:
 		return "critical"
 	default:
-		return fmt.Sprintf("pressureLevel(%d)", int(p))
+		return fmt.Sprintf("Pressure(%d)", int(p))
 	}
 }
 
@@ -33,24 +37,24 @@ func (p pressureLevel) String() string {
 // outcome we are steering toward instead of a launchd SIGBUS panic).
 const minBalloonFloorBytes = 512 * 1024 * 1024
 
-// balloonTarget returns the guest's target memory size in bytes for a given
+// HostTarget returns the guest's target memory size in bytes for a given
 // host memory-pressure level, where fullBytes is the guest's configured
 // (boot) memory. The target is how much memory the guest is allowed to use;
 // setting it below fullBytes inflates the virtio balloon, handing the
-// difference back to the host. pressureNormal restores the full size
+// difference back to the host. Normal restores the full size
 // (balloon fully deflated).
 //
 // The fractions are deliberately gentle: WARN gives back ~25% and CRITICAL
 // ~50%. With several guests live, even the WARN tier reclaims gigabytes —
 // enough to relieve the host before the kernel has to fault an unkillable
 // process like launchd. Reclaiming is never taken below minBalloonFloorBytes.
-func balloonTarget(level pressureLevel, fullBytes uint64) uint64 {
+func HostTarget(level Pressure, fullBytes uint64) uint64 {
 	switch level {
-	case pressureWarn:
+	case Warn:
 		return clampFloor(fullBytes/4*3, fullBytes)
-	case pressureCritical:
+	case Critical:
 		return clampFloor(fullBytes/2, fullBytes)
-	default: // pressureNormal
+	default: // Normal
 		return fullBytes
 	}
 }
@@ -69,7 +73,7 @@ func clampFloor(target, full uint64) uint64 {
 
 // Guest-demand policy.
 //
-// On top of the host-pressure floor (balloonTarget), a guest configured with
+// On top of the host-pressure floor (HostTarget), a guest configured with
 // a baseline below its ceiling is held near the baseline while idle and
 // allowed to grow toward the ceiling on demand. Demand is read from the guest
 // itself (memReport over vsock) because Apple's balloon reports no guest stats
@@ -107,7 +111,7 @@ const (
 	// out and never touches again, and far below anything that indicates real
 	// pressure.
 	//
-	// Occupancy alone is not enough to act on, though — see swapTrend.
+	// Occupancy alone is not enough to act on, though — see SwapTrend.
 	swapUsedFloorKiB = 64 * 1024
 
 	// swapQuietReportsBeforeReclaim is how many consecutive guest reports may
@@ -133,15 +137,15 @@ const (
 	swapQuietReportsBeforeReclaim = 24
 )
 
-// swapTrend tracks swap occupancy across guest reports, so the controller can
+// SwapTrend tracks swap occupancy across guest reports, so the controller can
 // tell a guest paging out right now from one that has old cold pages parked in
 // swap. One per VM, owned by runBalloonController's goroutine — no lock.
-type swapTrend struct {
+type SwapTrend struct {
 	prevUsedKiB uint64
 	quiet       int
 }
 
-// observe folds one guest report in and reports whether swap use should still
+// Observe folds one guest report in and reports whether swap use should still
 // count as evidence of memory pressure.
 //
 // Call it once per REPORT, not once per balloon re-evaluation. Growth is only
@@ -149,7 +153,7 @@ type swapTrend struct {
 // (as the reeval ticker would) counts as quiet and would decay the hold in
 // seconds instead of minutes. The controller keeps the verdict between reports,
 // exactly as it already keeps the report itself.
-func (s *swapTrend) observe(r memReport) bool {
+func (s *SwapTrend) Observe(r memReport) bool {
 	used := r.SwapUsedKiB()
 	// Below the floor is the same "no signal" as a guest with no swap device,
 	// or one whose agent is too old to report any — reset, so a later rise
@@ -177,12 +181,12 @@ const reclaimStepBytes = 128 * 1024 * 1024
 // guestDesiredTarget returns the balloon target the guest's own memory state
 // argues for, in the closed range [baseline, ceiling], given the current
 // target cur (used for gentle stepping and hysteresis). It ignores host
-// pressure; mergedBalloonTarget layers that on top.
+// pressure; MergedTarget layers that on top.
 //
 // A zero report (TotalKiB == 0) means "no fresh guest data" — the caller is
 // responsible for not constraining the guest in that case; here we simply hold
 // cur clamped into range.
-// swapPressure is swapTrend.observe's latest verdict for this guest: swap is
+// swapPressure is SwapTrend.Observe's latest verdict for this guest: swap is
 // in use AND recently growing. It is a parameter rather than something derived
 // from r because the judgement needs history across reports, which this
 // deliberately-pure function has none of.
@@ -217,19 +221,19 @@ func guestDesiredTarget(cur, baseline, ceiling uint64, r memReport, swapPressure
 	return clampRange(cur, baseline, ceiling)
 }
 
-// mergedBalloonTarget combines the guest's demand-driven target with the
+// MergedTarget combines the guest's demand-driven target with the
 // host-pressure floor. The guest may ask to grow up to the ceiling, but host
 // pressure caps how much memory the guest is allowed to hold: under WARN/
-// CRITICAL the cap drops to balloonTarget's fractions, reclaiming RAM for the
+// CRITICAL the cap drops to HostTarget's fractions, reclaiming RAM for the
 // host even against guest demand (the guest's DEFLATE_ON_OOM is its safety
 // net). The result is always min(guest-desired, host-allowed).
 // Note that swapPressure only ever suppresses the guest's own voluntary
 // reclaim; it is not a veto over the host. A guest holding swap still gets
 // clipped to 3/4 (WARN) or 1/2 (CRITICAL) of its ceiling, because the host
 // needing RAM outranks any read of what the guest would prefer.
-func mergedBalloonTarget(level pressureLevel, cur, baseline, ceiling uint64, r memReport, swapPressure bool) uint64 {
+func MergedTarget(level Pressure, cur, baseline, ceiling uint64, r memReport, swapPressure bool) uint64 {
 	desired := guestDesiredTarget(cur, baseline, ceiling, r, swapPressure)
-	allowed := balloonTarget(level, ceiling)
+	allowed := HostTarget(level, ceiling)
 	if desired > allowed {
 		return allowed
 	}

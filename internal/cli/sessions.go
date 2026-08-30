@@ -9,7 +9,7 @@ import (
 	"github.com/clawkwork/clawk/internal/sessions"
 )
 
-// Session history (git-modeled Claude Code conversations) is a vz-only
+// Session history (git-modeled Claude Code conversations) is a vz/qemu
 // feature for now: it relies on the per-sandbox ~/.claude state dir being a
 // virtio-fs LIVE mount, so the guest writes transcripts straight into the
 // host git working tree. Firecracker bakes state into the rootfs with no
@@ -23,7 +23,7 @@ import (
 // sessionHistoryEnabled reports whether session history applies to sb.
 func sessionHistoryEnabled(sb *config.Sandbox) bool {
 	switch sb.Provider {
-	case config.ProviderVZ, "":
+	case config.ProviderVZ, config.ProviderQEMU, "":
 		return len(sb.Phases) > 0
 	default:
 		return false
@@ -59,6 +59,12 @@ func ensureSessionProject(sb *config.Sandbox) (string, error) {
 // so the guest boots with prior transcripts and memory. Called before the
 // provider mounts the dir. Best-effort.
 func prepareSessionHistory(sb *config.Sandbox) {
+	// A QEMU restore requires the exact shared files seen by the suspended
+	// guest. Pulling history here would invalidate every saved memory image.
+	if sb.Provider == config.ProviderQEMU && hasSuspendState(suspendStateDir(store.VMDir(sb.Key()))) {
+		return
+	}
+
 	if !sessionHistoryEnabled(sb) {
 		return
 	}

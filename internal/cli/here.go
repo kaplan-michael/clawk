@@ -50,7 +50,7 @@ func rollbackFailedCreate(sb *config.Sandbox) {
 // ready". Silent when there's no log — a failure before the daemon started.
 func reportDaemonFailure(sb *config.Sandbox) {
 	vmDir := store.VMDir(sb.Name)
-	for _, name := range []string{"fcd.log", "vzd.log"} {
+	for _, name := range []string{"fcd.log", "vzd.log", "qemud.log"} {
 		path := filepath.Join(vmDir, name)
 		data, err := os.ReadFile(path)
 		if err != nil || len(data) == 0 {

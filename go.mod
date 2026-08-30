@@ -19,6 +19,7 @@ require (
 	github.com/google/go-containerregistry v0.20.2
 	github.com/google/renameio/v2 v2.0.2
 	github.com/hugelgupf/p9 v0.4.1
+	github.com/mdlayher/vsock v1.3.0
 	github.com/prashantgupta24/mac-sleep-notifier v1.0.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -47,6 +48,7 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-runewidth v0.0.21 // indirect
+	github.com/mdlayher/socket v0.6.0 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect

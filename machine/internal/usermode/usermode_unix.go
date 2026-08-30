@@ -4,7 +4,7 @@
 // unixgram NIC. Backends that want a filtered userspace TCP/IP stack —
 // without requiring root or a TAP device — pair one of these with their
 // hypervisor's unixgram NIC option (Code-Hex/vz
-// NewFileHandleNetworkDeviceAttachment, qemu -netdev stream/...).
+// NewFileHandleNetworkDeviceAttachment, qemu -netdev dgram/...).
 //
 // The package works on macOS and Linux; the only platform-specific piece
 // is the MSG_PEEK-based peer-address discovery, which we implement here
@@ -17,11 +17,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/clawkwork/clawk/machine"
@@ -86,6 +89,13 @@ type Stack struct {
 	// Close does not close it.
 	VMSocket *os.File
 
+	// VMPath and HostPath are the two named unixgram endpoints. Backends
+	// which cannot consume VMSocket by fd (notably QEMU's netdev dgram)
+	// may close VMSocket, unlink VMPath, and ask the VMM to bind VMPath and
+	// send to HostPath instead.
+	VMPath   string
+	HostPath string
+
 	// GuestIP is the IP gvproxy's DHCP server assigns to the guest. Ports
 	// in Config.Forwards are forwarded to this IP.
 	GuestIP string
@@ -94,10 +104,13 @@ type Stack struct {
 	// gvproxy's static DHCP lease.
 	GuestMAC string
 
-	host    *net.UnixConn
-	vn      *virtualnetwork.VirtualNetwork
-	cfg     Config
-	bindDir string
+	host      *net.UnixConn
+	vn        *virtualnetwork.VirtualNetwork
+	cfg       Config
+	bindDir   string
+	forwards  []string
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Start creates the unixgram pair, builds the gvproxy configuration, and
@@ -120,23 +133,39 @@ func Start(cfg Config) (_ *Stack, err error) {
 		if err != nil {
 			vmSocket.Close()
 			host.Close()
+			_ = os.RemoveAll(bindDir)
 		}
 	}()
 
+	// Add forwards explicitly so partial failures can roll back their host
+	// listeners. VirtualNetwork has no Close method and does not roll these
+	// back if a later configured port is already in use.
 	vn, err := virtualnetwork.New(buildGvproxyConfig(cfg), filterOptions(cfg.Filter)...)
 	if err != nil {
 		return nil, fmt.Errorf("usermode: creating virtual network: %w", err)
 	}
 
-	return &Stack{
+	s := &Stack{
 		VMSocket: vmSocket,
+		VMPath:   filepath.Join(bindDir, "vm.sock"),
+		HostPath: filepath.Join(bindDir, "host.sock"),
 		GuestIP:  defaultGuestIP,
 		GuestMAC: guestMAC(cfg.ID),
 		host:     host,
 		vn:       vn,
 		cfg:      cfg,
 		bindDir:  bindDir,
-	}, nil
+	}
+	for _, f := range cfg.Forwards {
+		local := fmt.Sprintf("127.0.0.1:%d", f.HostPort)
+		request := types.ExposeRequest{Protocol: types.TCP, Local: local, Remote: fmt.Sprintf("%s:%d", defaultGuestIP, f.GuestPort)}
+		if err := s.forwardRequest("expose", request); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		s.forwards = append(s.forwards, local)
+	}
+	return s, nil
 }
 
 // Serve peers with the guest and forwards packets until ctx is done. It
@@ -243,19 +272,55 @@ func (c *connectedUnixgram) Write(p []byte) (int, error) {
 //
 // VMSocket is not closed here; the hypervisor owns it after Start returns.
 func (s *Stack) Close() error {
-	// vn has no explicit Close; cancelling Serve's ctx is the shutdown
-	// signal. Drop the bound listener, then remove the rendezvous dir —
-	// it lives under /tmp, outside the caller's state dir, so it would
-	// otherwise leak past the VM's lifetime. Unlinking vm.sock here is
-	// safe: the hypervisor holds an open fd, and the guest has stopped by
-	// the time Close runs.
-	err := s.host.Close()
-	if s.bindDir != "" {
-		if rmErr := os.RemoveAll(s.bindDir); rmErr != nil && err == nil {
-			err = fmt.Errorf("removing rendezvous dir: %w", rmErr)
+	s.closeOnce.Do(func() {
+		// Serve cancellation stops packet transport, but gvproxy's listeners
+		// remain bound until explicitly unexposed. Release them before reporting
+		// the VM stopped so an immediate restore can bind the same host ports.
+		for _, local := range s.forwards {
+			s.closeErr = errors.Join(s.closeErr, s.forwardRequest("unexpose", types.UnexposeRequest{Protocol: types.TCP, Local: local}))
 		}
+		s.closeErr = errors.Join(s.closeErr, s.host.Close())
+		if s.bindDir != "" {
+			s.closeErr = errors.Join(s.closeErr, os.RemoveAll(s.bindDir))
+		}
+	})
+	return s.closeErr
+}
+
+// The library exposes its forwarding lifecycle through an in-process HTTP
+// handler. Invoke it directly; no host management endpoint is opened.
+func (s *Stack) forwardRequest(action string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
 	}
-	return err
+	req, err := http.NewRequest(http.MethodPost, "http://gvproxy/services/forwarder/"+action, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	result := &forwardResponse{header: make(http.Header)}
+	s.vn.ServicesMux().ServeHTTP(result, req)
+	if result.status != http.StatusOK {
+		return fmt.Errorf("usermode: %s port: %s", action, result.String())
+	}
+	return nil
+}
+
+type forwardResponse struct {
+	bytes.Buffer
+	header http.Header
+	status int
+}
+
+func (r *forwardResponse) Header() http.Header { return r.header }
+func (r *forwardResponse) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+}
+func (r *forwardResponse) Write(p []byte) (int, error) {
+	r.WriteHeader(http.StatusOK)
+	return r.Buffer.Write(p)
 }
 
 // rendezvousDir returns a short, per-VM directory for the unixgram
@@ -381,11 +446,6 @@ func guestMAC(id string) string {
 }
 
 func buildGvproxyConfig(cfg Config) *types.Configuration {
-	forwards := make(map[string]string, len(cfg.Forwards))
-	for _, f := range cfg.Forwards {
-		forwards[fmt.Sprintf("127.0.0.1:%d", f.HostPort)] =
-			fmt.Sprintf("%s:%d", defaultGuestIP, f.GuestPort)
-	}
 	return &types.Configuration{
 		MTU:               defaultMTU,
 		Subnet:            defaultSubnet,
@@ -396,7 +456,6 @@ func buildGvproxyConfig(cfg Config) *types.Configuration {
 			// NIC, and a mismatch downgrades the guest to a dynamic lease.
 			defaultGuestIP: guestMAC(cfg.ID),
 		},
-		Forwards: forwards,
 		NAT: map[string]string{
 			// host.containers.internal → real host loopback, mirroring
 			// Docker/podman convention so guest code can reach host

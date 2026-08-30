@@ -78,6 +78,12 @@ var debugDumpCmd = &cobra.Command{
 			"console.log",
 			"vzd.log", "vz.pid",
 			"fcd.log", "fc.pid", "fc/firecracker.log",
+			"qemud.log", "qemu-daemon.pid", "qemu/qemu.pid", "qemu/qemu.cmdline",
+		}
+		helperLogs, _ := filepath.Glob(filepath.Join(vmDir, "qemu", "virtiofs-*.log"))
+		for _, path := range helperLogs {
+			rel, _ := filepath.Rel(vmDir, path)
+			hostFiles = append(hostFiles, rel)
 		}
 		for _, f := range hostFiles {
 			path := filepath.Join(vmDir, f)

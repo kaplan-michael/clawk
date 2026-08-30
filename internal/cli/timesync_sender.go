@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package cli
 
@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/clawkwork/clawk/machine"
-	sleepnotifier "github.com/prashantgupta24/mac-sleep-notifier/notifier"
 )
 
 // startTimeSyncSender pushes the host's wallclock to the guest every
@@ -56,7 +55,7 @@ const (
 var timeSyncPushNow = make(chan struct{}, 1)
 
 // The daemon's lifecycle resume handler (shared code in daemon.go) can't
-// name triggerTimeSync directly — it's darwin-only — so it calls through
+// name triggerTimeSync directly — it's darwin/linux-only — so it calls through
 // the onVMResume hook, pointed here at init.
 func init() { onVMResume = triggerTimeSync }
 
@@ -84,31 +83,6 @@ func triggerTimeSync() {
 func startTimeSyncSender(ctx context.Context, m machine.Machine, logger *log.Logger) {
 	go runTimeSyncSender(ctx, m, logger)
 	go runSleepNotifierBridge(ctx, logger)
-}
-
-// runSleepNotifierBridge subscribes to mac-sleep-notifier and fires
-// triggerTimeSync on Awake events. Separate goroutine so a hung
-// notifier (the standby case) doesn't block the interval ticker.
-// We keep the interval ticker as a fallback for cases where the
-// notifier silently drops events (long-standby).
-func runSleepNotifierBridge(ctx context.Context, logger *log.Logger) {
-	notifier := sleepnotifier.GetInstance()
-	ch := notifier.Start()
-	defer notifier.Quit()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case activity, ok := <-ch:
-			if !ok {
-				return
-			}
-			if activity.Type == sleepnotifier.Awake {
-				logger.Printf("time-sync: Awake notification received; triggering immediate push")
-				triggerTimeSync()
-			}
-		}
-	}
 }
 
 func runTimeSyncSender(ctx context.Context, m machine.Machine, logger *log.Logger) {

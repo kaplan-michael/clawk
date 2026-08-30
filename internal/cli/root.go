@@ -130,7 +130,10 @@ func init() {
 	// entry points register their own copy.
 	registerSafeFlag(rootCmd)
 	rootCmd.PersistentFlags().StringVar(&providerFlag, "provider", "",
-		"VM provider for new sandboxes: vz (default; macOS, Apple Virtualization.framework + userspace networking via gvproxy) or firecracker (Linux)")
+		"VM provider for new sandboxes: vz (default; macOS, Apple Virtualization.framework + userspace networking via gvproxy), firecracker (Linux), or qemu (experimental Linux amd64 microvm)")
+	_ = rootCmd.RegisterFlagCompletionFunc("provider", func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return rankCompletions([]string{"vz", "firecracker", "qemu"}, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
 	rootCmd.PersistentFlags().StringVar(&imageFlag, "image", "",
 		"OCI image for new sandboxes (registry ref or docker-save tarball path; overrides clawk.mod)")
 	rootCmd.PersistentFlags().StringVar(&kernelFlag, "kernel", "",

@@ -144,7 +144,11 @@ func runDoctorChecks(name string) []doctorCheck {
 
 	// Host-level checks always run. They're cheap and useful even
 	// when a per-sandbox check follows.
-	results = append(results, hostChecks()...)
+	var selected *config.Sandbox
+	if name != "" {
+		selected, _ = store.Load(name)
+	}
+	results = append(results, hostChecksFor(selected)...)
 
 	if name == "" {
 		return results
@@ -166,7 +170,9 @@ func runDoctorChecks(name string) []doctorCheck {
 
 // hostChecks: state dir + per-OS host tools. Same probes the
 // first-run setup prober uses, framed as diagnostic output.
-func hostChecks() []doctorCheck {
+func hostChecks() []doctorCheck { return hostChecksFor(nil) }
+
+func hostChecksFor(sb *config.Sandbox) []doctorCheck {
 	var results []doctorCheck
 
 	results = append(results, doctorCheck{
@@ -188,7 +194,15 @@ func hostChecks() []doctorCheck {
 
 	// Per-OS hypervisor prerequisites (firecracker + /dev/kvm on Linux;
 	// none on macOS, where Virtualization.framework is linked in).
-	results = append(results, platformHostChecks()...)
+	provider := defaultProvider()
+	if providerFlag != "" {
+		provider = config.Provider(providerFlag).Normalize()
+	}
+	if sb != nil && sb.Provider != "" {
+		provider = sb.Provider.Normalize()
+	}
+	results = append(results, platformHostChecksFor(provider)...)
+	results = append(results, providerRecordChecks(sb, provider)...)
 
 	return results
 }
@@ -252,7 +266,7 @@ func sandboxChecks(sb *config.Sandbox) []doctorCheck {
 	// negative. On firecracker the daemon-alive check above plus the console
 	// scan below are the host-side signals; a live-guest probe would need
 	// the provider's exec channel, which has no short doctor deadline.
-	if sb.Provider == config.ProviderVZ {
+	if sb.Provider == config.ProviderVZ || sb.Provider == config.ProviderQEMU {
 		sockPath := filepath.Join(vmDir, "agent.sock")
 		if _, err := os.Stat(sockPath); err == nil {
 			results = append(results, ok("vm: agent.sock", sockPath))
@@ -393,10 +407,10 @@ func scanConsolePanics(path string, tailLines int) ([]string, error) {
 }
 
 // vmPIDFileNames are the per-provider VM-daemon pidfiles. Only one exists
-// on a given host — vz.pid on macOS (__vzd), fc.pid on Linux (__fcd) — so
-// helpers that answer "is the VM daemon alive?" check both to stay
+// for a given sandbox — vz.pid on macOS (__vzd), fc.pid (__fcd) or
+// qemu-daemon.pid (__qemud) on Linux — so helpers check all three to stay
 // provider-neutral. Checking the absent one is a harmless miss.
-var vmPIDFileNames = []string{"vz.pid", "fc.pid"}
+var vmPIDFileNames = []string{"vz.pid", "fc.pid", "qemu-daemon.pid"}
 
 // readVMPID reads whichever VM-daemon pidfile is present in vmDir. It's a
 // cross-platform sibling of the provider-specific readers (vz's
@@ -525,4 +539,15 @@ func emitDoctorJSON(cmd *cobra.Command, sandboxName string, results []doctorChec
 		os.Exit(2)
 	}
 	return nil
+}
+
+func daemonPIDFile(p config.Provider) string {
+	switch p.Normalize() {
+	case config.ProviderQEMU:
+		return "qemu-daemon.pid"
+	case config.ProviderFirecracker:
+		return "fc.pid"
+	default:
+		return "vz.pid"
+	}
 }
